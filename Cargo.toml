@@ -63,6 +63,7 @@ socket2 = { version = "0.5", features = ["all"] }
 [dev-dependencies]
 criterion = "0.5"
 env_logger = "0.11"
+monoio = { version = "0.2.4" }
 
 bit-vec-06 = { version = "0.6", package = "bit-vec" }
 chrono-04 = { version = "0.4", package = "chrono", default-features = false }
