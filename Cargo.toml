@@ -1,6 +1,6 @@
 [package]
 name = "monoio-postgres"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 authors = ["Mohamed Seleem <oss@mselee.com>"]
 edition = "2021"
 license = "MPL-2.0"
