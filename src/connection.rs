@@ -276,18 +276,15 @@ where
     S: AsyncReadRent + AsyncWriteRent + Unpin,
     T: AsyncReadRent + AsyncWriteRent + Unpin,
 {
-    type Item = Result<(), Error>;
+    type Item = Result<AsyncMessage, Error>;
 
     async fn next(&mut self) -> Option<Self::Item> {
-        while let Some(message) = self.poll_message().await {
-            match message {
-                Ok(AsyncMessage::Notice(notice)) => {
-                    info!("{}: {}", notice.severity(), notice.message());
-                }
-                Err(err) => return Some(Err(err)),
-                _ => {}
-            }
+        let message = self.poll_message().await;
+        if let Some(Ok(AsyncMessage::Notice(notice))) = message {
+            info!("{}: {}", notice.severity(), notice.message());
+            Some(Ok(AsyncMessage::Notice(notice)))
+        } else {
+            message
         }
-        Some(Ok(()))
     }
 }
