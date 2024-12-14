@@ -1,18 +1,19 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::prepare::get_type;
+use crate::clients::{InnerClient, Responses};
+use crate::connections::RequestMessages;
+use crate::entities::codec::FrontendMessage;
 use crate::types::{BorrowToSql, IsNull};
 use crate::{Column, Error, Portal, Row, Statement};
 use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
-use log::{debug, log_enabled, Level};
 use monoio::io::stream::Stream;
 use postgres_protocol::message::backend::{CommandCompleteBody, Message};
 use postgres_protocol::message::frontend;
 use postgres_types::Type;
 use std::fmt;
 use std::rc::Rc;
+use tracing::{debug, enabled, Level};
+
+use super::prepare::get_type;
 
 struct BorrowToSqlParamsDebug<'a, T>(&'a [T]);
 
@@ -37,7 +38,7 @@ where
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
 {
-    let buf = if log_enabled!(Level::Debug) {
+    let buf = if enabled!(Level::DEBUG) {
         let params = params.into_iter().collect::<Vec<_>>();
         debug!(
             "executing statement {} with parameters: {:?}",
@@ -159,7 +160,7 @@ where
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
 {
-    let buf = if log_enabled!(Level::Debug) {
+    let buf = if enabled!(Level::DEBUG) {
         let params = params.into_iter().collect::<Vec<_>>();
         debug!(
             "executing statement {} with parameters: {:?}",

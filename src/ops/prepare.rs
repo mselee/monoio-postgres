@@ -1,14 +1,12 @@
-use crate::client::InnerClient;
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
+use crate::clients::InnerClient;
+use crate::connections::RequestMessages;
+use crate::entities::codec::FrontendMessage;
 use crate::error::SqlState;
-use crate::ext::TryStreamExt;
+use crate::ext::{slice_iter, TryStreamExt};
 use crate::types::{Field, Kind, Oid, Type};
-use crate::{query, slice_iter, Row};
-use crate::{Column, Error, Statement};
+use crate::{Column, Error, Row, Statement};
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
-use log::debug;
 use monoio::io::stream::{Stream, StreamExt};
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
@@ -17,6 +15,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::thread_local;
+use tracing::debug;
+
+use super::query;
 
 const TYPEINFO_QUERY: &str = "\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid

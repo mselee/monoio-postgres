@@ -6,7 +6,7 @@
 //! use monoio_postgres::{NoTls, Error};
 //!
 //! # #[cfg(not(feature = "runtime"))] fn main() {}
-//! # #[cfg(feature = "runtime")]
+//! #
 //! #[monoio::main] // By default, monoio_postgres uses the monoio crate as its runtime.
 //! async fn main() -> Result<(), Error> {
 //!     // Connect to the database.
@@ -119,69 +119,36 @@
 #![warn(rust_2021_compatibility, clippy::all, missing_docs)]
 #![allow(async_fn_in_trait)]
 
-pub use crate::cancel_token::CancelToken;
-pub use crate::client::Client;
+// pub use crate::clients::socket::Socket;
+pub use crate::clients::raw::RawClient;
+pub use crate::clients::Client;
 pub use crate::config::Config;
-pub use crate::connection::Connection;
-pub use crate::copy_both::CopyBothDuplex;
-pub use crate::copy_in::CopyInSink;
-pub use crate::copy_out::CopyOutStream;
+pub use crate::connections::{Connection, RawConnection};
+pub use crate::entities::portal::Portal;
+pub use crate::entities::row::{Row, SimpleQueryRow};
+pub use crate::entities::statement::{Column, Statement};
+pub use crate::entities::to_statement::ToStatement;
 use crate::error::DbError;
 pub use crate::error::Error;
-pub use crate::generic_client::GenericClient;
-pub use crate::portal::Portal;
-pub use crate::query::RowStream;
-pub use crate::row::{Row, SimpleQueryRow};
-pub use crate::simple_query::{SimpleColumn, SimpleQueryStream};
-#[cfg(feature = "runtime")]
-pub use crate::socket::Socket;
-pub use crate::statement::{Column, Statement};
-#[cfg(feature = "runtime")]
-use crate::tls::MakeTlsConnect;
-pub use crate::tls::NoTls;
-pub use crate::to_statement::ToStatement;
-pub use crate::transaction::Transaction;
-pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
-use crate::types::ToSql;
-use std::sync::Arc;
+pub use crate::ops::copy_both::CopyBothDuplex;
+pub use crate::ops::copy_in::CopyInSink;
+pub use crate::ops::copy_out::CopyOutStream;
+pub use crate::ops::query::RowStream;
+pub use crate::ops::simple_query::{SimpleColumn, SimpleQueryStream};
+pub use crate::ops::transaction::Transaction;
+pub use crate::ops::transaction_builder::{IsolationLevel, TransactionBuilder};
 
-pub mod binary_copy;
-mod bind;
-#[cfg(feature = "runtime")]
-mod cancel_query;
-mod cancel_query_raw;
-mod cancel_token;
-mod client;
-mod codec;
+pub use crate::ops::binary_copy;
+
+mod clients;
 pub mod config;
-#[cfg(feature = "runtime")]
-mod connect;
-mod connect_raw;
-#[cfg(feature = "runtime")]
-mod connect_socket;
-mod connect_tls;
-mod connection;
-mod copy_both;
-mod copy_in;
-mod copy_out;
+mod connections;
+mod entities;
 pub mod error;
 pub mod ext;
-mod generic_client;
-#[cfg(not(target_arch = "wasm32"))]
-mod keepalive;
-mod maybe_tls_stream;
-mod portal;
-mod prepare;
-mod query;
-pub mod row;
-mod simple_query;
-#[cfg(feature = "runtime")]
-mod socket;
-mod statement;
-pub mod tls;
-mod to_statement;
-mod transaction;
-mod transaction_builder;
+mod ops;
+pub mod protocol;
+pub mod replication;
 pub mod types;
 
 /// A convenience function which parses a connection string and connects to the database.
@@ -191,17 +158,6 @@ pub mod types;
 /// Requires the `runtime` Cargo feature (enabled by default).
 ///
 /// [`Config`]: config/struct.Config.html
-#[cfg(feature = "runtime")]
-pub async fn connect<T>(
-    config: &str,
-    tls: T,
-) -> Result<(Client, Connection<Socket, T::Stream>), Error>
-where
-    T: MakeTlsConnect<Socket>,
-{
-    let config = config.parse::<Config>()?;
-    config.connect(tls).await
-}
 
 /// An asynchronous notification.
 #[derive(Clone, Debug)]
@@ -254,9 +210,5 @@ pub enum SimpleQueryMessage {
     /// The number of rows modified or selected is returned.
     CommandComplete(u64),
     /// Column values of the proceeding row values
-    RowDescription(Arc<[SimpleColumn]>),
-}
-
-fn slice_iter<'a>(s: &'a [&'a (dyn ToSql)]) -> impl ExactSizeIterator<Item = &'a dyn ToSql> + 'a {
-    s.iter().map(|s| *s as _)
+    RowDescription(std::rc::Rc<[SimpleColumn]>),
 }

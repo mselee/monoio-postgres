@@ -1,41 +1,27 @@
-use crate::codec::{BackendMessages, FrontendMessage};
-use crate::config::SslMode;
-use crate::connection::{Request, RequestMessages};
-use crate::copy_both::{CopyBothDuplex, CopyBothReceiver};
-use crate::copy_out::CopyOutStream;
-use crate::ext::TryStreamExt;
-#[cfg(feature = "runtime")]
-use crate::keepalive::KeepaliveConfig;
-use crate::query::RowStream;
-use crate::simple_query::SimpleQueryStream;
-#[cfg(feature = "runtime")]
-use crate::tls::MakeTlsConnect;
-use crate::tls::TlsConnect;
-use crate::types::{Oid, ToSql, Type};
-#[cfg(feature = "runtime")]
-use crate::Socket;
-use crate::{
-    copy_both, copy_in, copy_out, prepare, query, simple_query, slice_iter, CancelToken,
-    CopyInSink, Error, Row, SimpleQueryMessage, Statement, ToStatement, Transaction,
-    TransactionBuilder,
-};
+pub(crate) mod raw;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+
+use crate::connections::{Request, RequestMessages};
+use crate::ext::{slice_iter, TryStreamExt};
+use crate::ops::copy_both::{self, CopyBothReceiver};
+use crate::ops::{copy_in, copy_out, prepare, query, simple_query};
+use crate::protocol::message::backend::Message;
 use bytes::{Buf, BytesMut};
 use fallible_iterator::FallibleIterator;
 use local_sync::mpsc;
 use monoio::io::stream::Stream;
-use monoio::io::{AsyncReadRent, AsyncWriteRent};
-use parking_lot::Mutex;
-use postgres_protocol::message::backend::Message;
-use postgres_types::BorrowToSql;
-use std::collections::HashMap;
-use std::fmt;
-#[cfg(feature = "runtime")]
-use std::net::IpAddr;
-#[cfg(feature = "runtime")]
-use std::path::PathBuf;
-use std::rc::Rc;
-#[cfg(feature = "runtime")]
-use std::time::Duration;
+
+use crate::entities::codec::{BackendMessages, FrontendMessage};
+use crate::types::{BorrowToSql, Oid, ToSql, Type};
+use crate::{
+    Config, CopyBothDuplex, CopyInSink, CopyOutStream, Error, Row, RowStream, SimpleQueryMessage,
+    SimpleQueryStream, Statement, ToStatement, Transaction, TransactionBuilder,
+};
 
 pub struct Responses {
     receiver: mpsc::bounded::Rx<BackendMessages>,
@@ -97,10 +83,10 @@ struct CachedTypeInfo {
 
 pub struct InnerClient {
     sender: mpsc::unbounded::Tx<Request>,
-    cached_typeinfo: Mutex<CachedTypeInfo>,
+    cached_typeinfo: RefCell<CachedTypeInfo>,
 
     /// A buffer to use when writing out postgres commands.
-    buffer: Mutex<BytesMut>,
+    buffer: RefCell<BytesMut>,
 }
 
 impl InnerClient {
@@ -140,39 +126,42 @@ impl InnerClient {
     }
 
     pub fn typeinfo(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo.clone()
+        self.cached_typeinfo.borrow().typeinfo.clone()
     }
 
     pub fn set_typeinfo(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
+        self.cached_typeinfo.borrow_mut().typeinfo = Some(statement.clone());
     }
 
     pub fn typeinfo_composite(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_composite.clone()
+        self.cached_typeinfo.borrow().typeinfo_composite.clone()
     }
 
     pub fn set_typeinfo_composite(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
+        self.cached_typeinfo.borrow_mut().typeinfo_composite = Some(statement.clone());
     }
 
     pub fn typeinfo_enum(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_enum.clone()
+        self.cached_typeinfo.borrow().typeinfo_enum.clone()
     }
 
     pub fn set_typeinfo_enum(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
+        self.cached_typeinfo.borrow_mut().typeinfo_enum = Some(statement.clone());
     }
 
     pub fn type_(&self, oid: Oid) -> Option<Type> {
-        self.cached_typeinfo.lock().types.get(&oid).cloned()
+        self.cached_typeinfo.borrow().types.get(&oid).cloned()
     }
 
     pub fn set_type(&self, oid: Oid, type_: &Type) {
-        self.cached_typeinfo.lock().types.insert(oid, type_.clone());
+        self.cached_typeinfo
+            .borrow_mut()
+            .types
+            .insert(oid, type_.clone());
     }
 
     pub fn clear_type_cache(&self) {
-        self.cached_typeinfo.lock().types.clear();
+        self.cached_typeinfo.borrow_mut().types.clear();
     }
 
     /// Call the given function with a buffer to be used when writing out
@@ -181,80 +170,31 @@ impl InnerClient {
     where
         F: FnOnce(&mut BytesMut) -> R,
     {
-        let mut buffer = self.buffer.lock();
+        let mut buffer = self.buffer.borrow_mut();
         let r = f(&mut buffer);
         buffer.clear();
         r
     }
 }
 
-#[cfg(feature = "runtime")]
-#[derive(Clone)]
-pub(crate) struct SocketConfig {
-    pub addr: Addr,
-    pub hostname: Option<String>,
-    pub port: u16,
-    pub connect_timeout: Option<Duration>,
-    pub tcp_user_timeout: Option<Duration>,
-    pub keepalive: Option<KeepaliveConfig>,
-}
+pub trait Client: Sized {
+    type Transport;
+    type Connection;
 
-#[cfg(feature = "runtime")]
-#[derive(Clone)]
-pub(crate) enum Addr {
-    Tcp(IpAddr),
-    #[cfg(unix)]
-    Unix(PathBuf),
-}
+    fn inner(&self) -> &Rc<InnerClient>;
 
-/// An asynchronous PostgreSQL client.
-///
-/// The client is one half of what is returned when a connection is established. Users interact with the database
-/// through this client object.
-pub struct Client {
-    inner: Rc<InnerClient>,
-    #[cfg(feature = "runtime")]
-    socket_config: Option<SocketConfig>,
-    ssl_mode: SslMode,
-    process_id: i32,
-    secret_key: i32,
-}
+    async fn reconnect(&self) -> Result<(Self, Self::Connection), Error>;
 
-impl Client {
-    pub(crate) fn new(
-        sender: mpsc::unbounded::Tx<Request>,
-        ssl_mode: SslMode,
-        process_id: i32,
-        secret_key: i32,
-    ) -> Client {
-        Client {
-            inner: Rc::new(InnerClient {
-                sender,
-                cached_typeinfo: Default::default(),
-                buffer: Default::default(),
-            }),
-            #[cfg(feature = "runtime")]
-            socket_config: None,
-            ssl_mode,
-            process_id,
-            secret_key,
-        }
-    }
-
-    pub(crate) fn inner(&self) -> &Rc<InnerClient> {
-        &self.inner
-    }
-
-    #[cfg(feature = "runtime")]
-    pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {
-        self.socket_config = Some(socket_config);
-    }
+    async fn connect(
+        config: Config,
+        connector: fn(&Config) -> Pin<Box<dyn Future<Output = std::io::Result<Self::Transport>>>>,
+    ) -> Result<(Self, Self::Connection), Error>;
 
     /// Creates a new prepared statement.
     ///
     /// Prepared statements can be executed repeatedly, and may contain query parameters (indicated by `$1`, `$2`, etc),
     /// which are set when executed. Prepared statements can only be used with the connection that created them.
-    pub async fn prepare(&self, query: &str) -> Result<Statement, Error> {
+    async fn prepare(&self, query: &str) -> Result<Statement, Error> {
         self.prepare_typed(query, &[]).await
     }
 
@@ -262,12 +202,12 @@ impl Client {
     ///
     /// The list of types may be smaller than the number of parameters - the types of the remaining parameters will be
     /// inferred. For example, `client.prepare_typed(query, &[])` is equivalent to `client.prepare(query)`.
-    pub async fn prepare_typed(
+    async fn prepare_typed(
         &self,
         query: &str,
         parameter_types: &[Type],
     ) -> Result<Statement, Error> {
-        prepare::prepare(&self.inner, query, parameter_types).await
+        prepare::prepare(&self.inner(), query, parameter_types).await
     }
 
     /// Executes a statement, returning a vector of the resulting rows.
@@ -278,7 +218,7 @@ impl Client {
     /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
     /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
     /// with the `prepare` method.
-    pub async fn query<T>(&self, statement: &T, params: &[&(dyn ToSql)]) -> Result<Vec<Row>, Error>
+    async fn query<T>(&self, statement: &T, params: &[&(dyn ToSql)]) -> Result<Vec<Row>, Error>
     where
         T: ?Sized + ToStatement,
     {
@@ -298,7 +238,7 @@ impl Client {
     /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
     /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
     /// with the `prepare` method.
-    pub async fn query_one<T>(&self, statement: &T, params: &[&(dyn ToSql)]) -> Result<Row, Error>
+    async fn query_one<T>(&self, statement: &T, params: &[&(dyn ToSql)]) -> Result<Row, Error>
     where
         T: ?Sized + ToStatement,
     {
@@ -317,7 +257,7 @@ impl Client {
     /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
     /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
     /// with the `prepare` method.
-    pub async fn query_opt<T>(
+    async fn query_opt<T>(
         &self,
         statement: &T,
         params: &[&(dyn ToSql)],
@@ -326,7 +266,6 @@ impl Client {
         T: ?Sized + ToStatement,
     {
         let mut stream = self.query_raw(statement, slice_iter(params)).await?;
-
         let mut first = None;
 
         // Originally this was two calls to `try_next().await?`,
@@ -379,7 +318,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn query_raw<T, P, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
+    async fn query_raw<T, P, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
     where
         T: ?Sized + ToStatement,
         P: BorrowToSql,
@@ -387,7 +326,7 @@ impl Client {
         I::IntoIter: ExactSizeIterator,
     {
         let statement = statement.__convert().into_statement(self).await?;
-        query::query(&self.inner, statement, params).await
+        query::query(&self.inner(), statement, params).await
     }
 
     /// Like `query`, but requires the types of query parameters to be explicitly specified.
@@ -399,7 +338,7 @@ impl Client {
     ///
     /// A statement may contain parameters, specified by `$n`, where `n` is the index of the
     /// parameter of the list provided, 1-indexed.
-    pub async fn query_typed(
+    async fn query_typed(
         &self,
         query: &str,
         params: &[(&(dyn ToSql), Type)],
@@ -446,12 +385,12 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn query_typed_raw<P, I>(&self, query: &str, params: I) -> Result<RowStream, Error>
+    async fn query_typed_raw<P, I>(&self, query: &str, params: I) -> Result<RowStream, Error>
     where
         P: BorrowToSql,
         I: IntoIterator<Item = (P, Type)>,
     {
-        query::query_typed(&self.inner, query, params).await
+        query::query_typed(&self.inner(), query, params).await
     }
 
     /// Executes a statement, returning the number of rows modified.
@@ -464,7 +403,7 @@ impl Client {
     /// with the `prepare` method.
     ///
     /// If the statement does not modify any rows (e.g. `SELECT`), 0 is returned.
-    pub async fn execute<T>(&self, statement: &T, params: &[&(dyn ToSql)]) -> Result<u64, Error>
+    async fn execute<T>(&self, statement: &T, params: &[&(dyn ToSql)]) -> Result<u64, Error>
     where
         T: ?Sized + ToStatement,
     {
@@ -481,7 +420,7 @@ impl Client {
     /// with the `prepare` method.
     ///
     /// [`execute`]: #method.execute
-    pub async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
+    async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
     where
         T: ?Sized + ToStatement,
         P: BorrowToSql,
@@ -496,7 +435,7 @@ impl Client {
     ///
     /// PostgreSQL does not support parameters in `COPY` statements, so this method does not take any. The copy *must*
     /// be explicitly completed via the `Sink::close` or `finish` methods. If it is not, the copy will be aborted.
-    pub async fn copy_in<T, U>(&self, statement: &T) -> Result<CopyInSink<U>, Error>
+    async fn copy_in<T, U>(&self, statement: &T) -> Result<CopyInSink<U>, Error>
     where
         T: ?Sized + ToStatement,
         U: Buf + 'static + Send,
@@ -506,7 +445,7 @@ impl Client {
     }
 
     /// Executes a `COPY FROM STDIN` query, returning a sink used to write the copy data.
-    pub async fn copy_in_simple<U>(&self, query: &str) -> Result<CopyInSink<U>, Error>
+    async fn copy_in_simple<U>(&self, query: &str) -> Result<CopyInSink<U>, Error>
     where
         U: Buf + 'static + Send,
     {
@@ -516,7 +455,7 @@ impl Client {
     /// Executes a `COPY TO STDOUT` statement, returning a stream of the resulting data.
     ///
     /// PostgreSQL does not support parameters in `COPY` statements, so this method does not take any.
-    pub async fn copy_out<T>(&self, statement: &T) -> Result<CopyOutStream, Error>
+    async fn copy_out<T>(&self, statement: &T) -> Result<CopyOutStream, Error>
     where
         T: ?Sized + ToStatement,
     {
@@ -525,13 +464,13 @@ impl Client {
     }
 
     /// Executes a `COPY TO STDOUT` query, returning a stream of the resulting data.
-    pub async fn copy_out_simple(&self, query: &str) -> Result<CopyOutStream, Error> {
+    async fn copy_out_simple(&self, query: &str) -> Result<CopyOutStream, Error> {
         copy_out::copy_out_simple(self.inner(), query).await
     }
 
     /// Executes a CopyBoth query, returning a combined Stream+Sink type to read and write copy
     /// data.
-    pub async fn copy_both_simple<T>(&self, query: &str) -> Result<CopyBothDuplex<T>, Error>
+    async fn copy_both_simple<T>(&self, query: &str) -> Result<CopyBothDuplex<T>, Error>
     where
         T: Buf + 'static + Send,
     {
@@ -551,11 +490,11 @@ impl Client {
     /// Prepared statements should be use for any query which contains user-specified data, as they provided the
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
-    pub async fn simple_query(&self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
+    async fn simple_query(&self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
         self.simple_query_raw(query).await?.try_collect().await
     }
 
-    pub(crate) async fn simple_query_raw(&self, query: &str) -> Result<SimpleQueryStream, Error> {
+    async fn simple_query_raw(&self, query: &str) -> Result<SimpleQueryStream, Error> {
         simple_query::simple_query(self.inner(), query).await
     }
 
@@ -569,14 +508,14 @@ impl Client {
     /// Prepared statements should be use for any query which contains user-specified data, as they provided the
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
-    pub async fn batch_execute(&self, query: &str) -> Result<(), Error> {
+    async fn batch_execute(&self, query: &str) -> Result<(), Error> {
         simple_query::batch_execute(self.inner(), query).await
     }
 
     /// Begins a new database transaction.
     ///
     /// The transaction will roll back by default - use the `commit` method to commit it.
-    pub async fn transaction(&mut self) -> Result<Transaction<'_>, Error> {
+    async fn transaction(&mut self) -> Result<Transaction<'_, Self>, Error> {
         self.build_transaction().start().await
     }
 
@@ -584,77 +523,26 @@ impl Client {
     ///
     /// Unlike the `transaction` method, the builder can be used to control the transaction's isolation level and other
     /// attributes.
-    pub fn build_transaction(&mut self) -> TransactionBuilder<'_> {
+    fn build_transaction(&mut self) -> TransactionBuilder<'_, Self> {
         TransactionBuilder::new(self)
     }
 
     /// Returns the server's process ID for the connection.
-    pub fn backend_pid(&self) -> i32 {
-        self.process_id
-    }
-
-    /// Constructs a cancellation token that can later be used to request cancellation of a query running on the
-    /// connection associated with this client.
-    pub fn cancel_token(&self) -> CancelToken {
-        CancelToken {
-            #[cfg(feature = "runtime")]
-            socket_config: self.socket_config.clone(),
-            ssl_mode: self.ssl_mode,
-            process_id: self.process_id,
-            secret_key: self.secret_key,
-        }
-    }
-
-    /// Attempts to cancel an in-progress query.
-    ///
-    /// The server provides no information about whether a cancellation attempt was successful or not. An error will
-    /// only be returned if the client was unable to connect to the database.
-    ///
-    /// Requires the `runtime` Cargo feature (enabled by default).
-    #[cfg(feature = "runtime")]
-    #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
-    pub async fn cancel_query<T>(&self, tls: T) -> Result<(), Error>
-    where
-        T: MakeTlsConnect<Socket>,
-    {
-        self.cancel_token().cancel_query(tls).await
-    }
-
-    /// Like `cancel_query`, but uses a stream which is already connected to the server rather than opening a new
-    /// connection itself.
-    #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
-    pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>
-    where
-        S: AsyncReadRent + AsyncWriteRent + Unpin,
-        T: TlsConnect<S>,
-    {
-        self.cancel_token().cancel_query_raw(stream, tls).await
-    }
+    fn backend_pid(&self) -> i32;
 
     /// Clears the client's type information cache.
     ///
     /// When user-defined types are used in a query, the client loads their definitions from the database and caches
     /// them for the lifetime of the client. If those definitions are changed in the database, this method can be used
     /// to flush the local cache and allow the new, updated definitions to be loaded.
-    pub fn clear_type_cache(&self) {
+    fn clear_type_cache(&self) {
         self.inner().clear_type_cache();
     }
 
     /// Determines if the connection to the server has already closed.
     ///
     /// In that case, all future queries will fail.
-    pub fn is_closed(&self) -> bool {
-        self.inner.sender.is_closed()
-    }
-
-    #[doc(hidden)]
-    pub fn __private_api_close(&mut self) {
-        self.inner.sender.close()
-    }
-}
-
-impl fmt::Debug for Client {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client").finish()
+    fn is_closed(&self) -> bool {
+        self.inner().sender.is_closed()
     }
 }

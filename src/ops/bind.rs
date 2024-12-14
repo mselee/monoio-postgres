@@ -1,13 +1,16 @@
-use crate::client::InnerClient;
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::types::BorrowToSql;
-use crate::{query, Error, Portal, Statement};
 use monoio::io::stream::Stream;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
+use postgres_types::BorrowToSql;
 use std::cell::Cell;
 use std::rc::Rc;
+
+use crate::clients::InnerClient;
+use crate::connections::RequestMessages;
+use crate::entities::codec::FrontendMessage;
+use crate::{Error, Portal, Statement};
+
+use super::query;
 
 thread_local! {
     static NEXT_ID: Cell<usize> = Cell::new(0);

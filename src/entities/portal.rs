@@ -1,9 +1,8 @@
-use crate::client::InnerClient;
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::Statement;
+use crate::{clients::InnerClient, connections::RequestMessages, Statement};
 use postgres_protocol::message::frontend;
 use std::rc::{Rc, Weak};
+
+use super::codec::FrontendMessage;
 
 struct Inner {
     client: Weak<InnerClient>,

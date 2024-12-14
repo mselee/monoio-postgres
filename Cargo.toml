@@ -13,16 +13,8 @@ categories = ["database"]
 [lib]
 test = false
 
-[[bench]]
-name = "bench"
-harness = false
-
 [package.metadata.docs.rs]
 all-features = true
-
-[features]
-default = ["runtime"]
-runtime = []
 
 array-impls = ["postgres-types/array-impls"]
 with-bit-vec-0_6 = ["postgres-types/with-bit-vec-0_6"]
@@ -41,21 +33,24 @@ js = ["postgres-protocol/js", "postgres-types/js"]
 
 [dependencies]
 bytes = "1.0"
+memchr = "2.0"
 byteorder = "1.0"
 fallible-iterator = "0.2"
-log = "0.4"
-parking_lot = "0.12"
+tracing = { version = "0.1.40", default-features = false }
 percent-encoding = "2.0"
-pin-project-lite = "0.2"
 phf = "0.11"
-postgres-protocol = { git = "https://github.com/imor/rust-postgres", rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
-postgres-types = { git = "https://github.com/imor/rust-postgres", rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
+postgres-protocol = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "7d2f14e35e97973995c39662cde618036a0f9484" }
+postgres-types = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "7d2f14e35e97973995c39662cde618036a0f9484" }
 serde = { version = "1.0", optional = true }
 rand = "0.8.5"
 whoami = "1.4.1"
-monoio = { version = "0.2.4", default-features = false, features = ["bytes"] }
-local-sync = { git = "https://github.com/mselee/local-sync", rev = "d71f9168e0736404fa6eb6bd41209224770e072a" }
-monoio-codec = "0.3.4"
+monoio = { version = "0.2.4", default-features = false, features = [
+    "bytes",
+    "macros",
+    "async-cancel",
+] }
+local-sync = { git = "https://github.com/mselee/local-sync", rev = "ac522c3aee79337ad41c9c3c3dbdb2155f1e570f" }
+monoio-codec = { git = "https://github.com/mselee/monoio-codec", rev = "9ee9a89f6a82e91cb27167fe48def0270239cc75" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 socket2 = { version = "0.5", features = ["all"] }

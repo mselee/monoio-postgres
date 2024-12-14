@@ -1,6 +1,8 @@
 use postgres_protocol::message::frontend;
 
-use crate::{codec::FrontendMessage, connection::RequestMessages, Client, Error, Transaction};
+use crate::{
+    connections::RequestMessages, entities::codec::FrontendMessage, Client, Error, Transaction,
+};
 
 /// The isolation level of a database transaction.
 #[derive(Debug, Copy, Clone)]
@@ -22,15 +24,15 @@ pub enum IsolationLevel {
 }
 
 /// A builder for database transactions.
-pub struct TransactionBuilder<'a> {
-    client: &'a mut Client,
+pub struct TransactionBuilder<'a, C: Client> {
+    client: &'a mut C,
     isolation_level: Option<IsolationLevel>,
     read_only: Option<bool>,
     deferrable: Option<bool>,
 }
 
-impl<'a> TransactionBuilder<'a> {
-    pub(crate) fn new(client: &'a mut Client) -> TransactionBuilder<'a> {
+impl<'a, C: Client> TransactionBuilder<'a, C> {
+    pub(crate) fn new(client: &'a mut C) -> Self {
         TransactionBuilder {
             client,
             isolation_level: None,
@@ -64,7 +66,7 @@ impl<'a> TransactionBuilder<'a> {
     /// Begins the transaction.
     ///
     /// The transaction will roll back by default - use the `commit` method to commit it.
-    pub async fn start(self) -> Result<Transaction<'a>, Error> {
+    pub async fn start(self) -> Result<Transaction<'a, C>, Error> {
         let mut query = "START TRANSACTION".to_string();
         let mut first = true;
 
@@ -108,12 +110,12 @@ impl<'a> TransactionBuilder<'a> {
             query.push_str(s);
         }
 
-        struct RollbackIfNotDone<'me> {
-            client: &'me Client,
+        struct RollbackIfNotDone<'me, C: Client> {
+            client: &'me C,
             done: bool,
         }
 
-        impl<'a> Drop for RollbackIfNotDone<'a> {
+        impl<'a, C: Client> Drop for RollbackIfNotDone<'a, C> {
             fn drop(&mut self) {
                 if self.done {
                     return;

@@ -1,16 +1,16 @@
 //! Rows.
 
-use crate::row::sealed::{AsName, Sealed};
-use crate::simple_query::SimpleColumn;
-use crate::statement::Column;
+use crate::entities::row::sealed::{AsName, Sealed};
+use crate::entities::statement::Column;
+use crate::ops::simple_query::SimpleColumn;
 use crate::types::{FromSql, Type, WrongType};
 use crate::{Error, Statement};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::DataRowBody;
 use std::fmt;
 use std::ops::Range;
+use std::rc::Rc;
 use std::str;
-use std::sync::Arc;
 
 mod sealed {
     pub trait Sealed {}
@@ -200,7 +200,7 @@ impl AsName for SimpleColumn {
 /// A row of data returned from the database by a simple query.
 #[derive(Debug)]
 pub struct SimpleQueryRow {
-    columns: Arc<[SimpleColumn]>,
+    columns: Rc<[SimpleColumn]>,
     body: DataRowBody,
     ranges: Vec<Option<Range<usize>>>,
 }
@@ -208,7 +208,7 @@ pub struct SimpleQueryRow {
 impl SimpleQueryRow {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(
-        columns: Arc<[SimpleColumn]>,
+        columns: Rc<[SimpleColumn]>,
         body: DataRowBody,
     ) -> Result<SimpleQueryRow, Error> {
         let ranges = body.ranges().collect().map_err(Error::parse)?;

@@ -1,28 +1,22 @@
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::copy_out::CopyOutStream;
-use crate::ext::TryStreamExt;
-use crate::query::RowStream;
-#[cfg(feature = "runtime")]
-use crate::tls::MakeTlsConnect;
-use crate::tls::TlsConnect;
+use crate::connections::RequestMessages;
+use crate::entities::codec::FrontendMessage;
+use crate::ext::{slice_iter, TryStreamExt};
 use crate::types::{BorrowToSql, ToSql, Type};
-#[cfg(feature = "runtime")]
-use crate::Socket;
 use crate::{
-    bind, query, slice_iter, CancelToken, Client, CopyInSink, Error, Portal, Row,
-    SimpleQueryMessage, Statement, ToStatement,
+    Client, CopyInSink, CopyOutStream, Error, Portal, Row, RowStream, SimpleQueryMessage,
+    Statement, ToStatement,
 };
 use bytes::Buf;
-use monoio::io::{AsyncReadRent, AsyncWriteRent};
 use postgres_protocol::message::frontend;
+
+use super::{bind, query};
 
 /// A representation of a PostgreSQL database transaction.
 ///
 /// Transactions will implicitly roll back when dropped. Use the `commit` method to commit the changes made in the
 /// transaction. Transactions can be nested, with inner transactions implemented via safepoints.
-pub struct Transaction<'a> {
-    client: &'a mut Client,
+pub struct Transaction<'a, C: Client> {
+    client: &'a mut C,
     savepoint: Option<Savepoint>,
     done: bool,
 }
@@ -33,7 +27,7 @@ struct Savepoint {
     depth: u32,
 }
 
-impl<'a> Drop for Transaction<'a> {
+impl<'a, C: Client> Drop for Transaction<'a, C> {
     fn drop(&mut self) {
         if self.done {
             return;
@@ -55,8 +49,8 @@ impl<'a> Drop for Transaction<'a> {
     }
 }
 
-impl<'a> Transaction<'a> {
-    pub(crate) fn new(client: &'a mut Client) -> Transaction<'a> {
+impl<'a, C: Client> Transaction<'a, C> {
+    pub(crate) fn new(client: &'a mut C) -> Self {
         Transaction {
             client,
             savepoint: None,
@@ -256,47 +250,20 @@ impl<'a> Transaction<'a> {
         self.client.batch_execute(query).await
     }
 
-    /// Like `Client::cancel_token`.
-    pub fn cancel_token(&self) -> CancelToken {
-        self.client.cancel_token()
-    }
-
-    /// Like `Client::cancel_query`.
-    #[cfg(feature = "runtime")]
-    #[deprecated(since = "0.6.0", note = "use Transaction::cancel_token() instead")]
-    pub async fn cancel_query<T>(&self, tls: T) -> Result<(), Error>
-    where
-        T: MakeTlsConnect<Socket>,
-    {
-        #[allow(deprecated)]
-        self.client.cancel_query(tls).await
-    }
-
-    /// Like `Client::cancel_query_raw`.
-    #[deprecated(since = "0.6.0", note = "use Transaction::cancel_token() instead")]
-    pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>
-    where
-        S: AsyncReadRent + AsyncWriteRent + Unpin,
-        T: TlsConnect<S>,
-    {
-        #[allow(deprecated)]
-        self.client.cancel_query_raw(stream, tls).await
-    }
-
     /// Like `Client::transaction`, but creates a nested transaction via a savepoint.
-    pub async fn transaction(&mut self) -> Result<Transaction<'_>, Error> {
+    pub async fn transaction(&mut self) -> Result<Transaction<'_, C>, Error> {
         self._savepoint(None).await
     }
 
     /// Like `Client::transaction`, but creates a nested transaction via a savepoint with the specified name.
-    pub async fn savepoint<I>(&mut self, name: I) -> Result<Transaction<'_>, Error>
+    pub async fn savepoint<I>(&mut self, name: I) -> Result<Transaction<'_, C>, Error>
     where
         I: Into<String>,
     {
         self._savepoint(Some(name.into())).await
     }
 
-    async fn _savepoint(&mut self, name: Option<String>) -> Result<Transaction<'_>, Error> {
+    async fn _savepoint(&mut self, name: Option<String>) -> Result<Transaction<'_, C>, Error> {
         let depth = self.savepoint.as_ref().map_or(0, |sp| sp.depth) + 1;
         let name = name.unwrap_or_else(|| format!("sp_{}", depth));
         let query = format!("SAVEPOINT {}", name);
@@ -310,7 +277,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Returns a reference to the underlying `Client`.
-    pub fn client(&self) -> &Client {
+    pub fn client(&self) -> &C {
         self.client
     }
 }

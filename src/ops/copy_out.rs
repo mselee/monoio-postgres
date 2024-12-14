@@ -1,11 +1,16 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::{query, simple_query, slice_iter, Error, Statement};
 use bytes::Bytes;
-use log::debug;
 use monoio::io::stream::Stream;
 use postgres_protocol::message::backend::Message;
+use tracing::debug;
+
+use crate::{
+    clients::{InnerClient, Responses},
+    connections::RequestMessages,
+    entities::codec::FrontendMessage,
+    ext::slice_iter,
+    ops::{query, simple_query},
+    Error, Statement,
+};
 
 pub async fn copy_out_simple(client: &InnerClient, query: &str) -> Result<CopyOutStream, Error> {
     debug!("executing copy out query {}", query);

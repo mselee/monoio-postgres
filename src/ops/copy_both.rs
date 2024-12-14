@@ -1,15 +1,17 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::{simple_query, Error};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use local_sync::mpsc;
-use log::debug;
 use monoio::io::sink::Sink;
 use monoio::io::stream::Stream;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use postgres_protocol::message::frontend::CopyData;
 use std::marker::PhantomData;
+use tracing::debug;
+
+use crate::clients::{InnerClient, Responses};
+use crate::entities::codec::FrontendMessage;
+use crate::ops::simple_query;
+use crate::Error;
 
 /// The state machine of CopyBothReceiver
 ///
@@ -165,6 +167,10 @@ impl CopyBothReceiver {
                 None => return Some(()),
             }
         }
+    }
+
+    pub(crate) fn hint(&self) -> usize {
+        self.sink_receiver.hint()
     }
 }
 

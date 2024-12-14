@@ -1,4 +1,5 @@
 use monoio::io::stream::Stream;
+use postgres_types::ToSql;
 
 pub trait TryStreamExt: Stream {
     /// Collects all items from the stream into a container, such as a Vec.
@@ -37,5 +38,10 @@ pub trait TryStreamExt: Stream {
     }
 }
 
-// Blanket implementation of StreamExt for all types implementing Stream
 impl<T, E, S: ?Sized + Stream<Item = Result<T, E>>> TryStreamExt for S {}
+
+pub(crate) fn slice_iter<'a>(
+    s: &'a [&'a (dyn ToSql)],
+) -> impl ExactSizeIterator<Item = &'a dyn ToSql> + 'a {
+    s.iter().map(|s| *s as _)
+}

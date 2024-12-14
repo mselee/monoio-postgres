@@ -1,15 +1,16 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::query::extract_row_affected;
+use crate::clients::{InnerClient, Responses};
+use crate::connections::RequestMessages;
+use crate::entities::codec::FrontendMessage;
 use crate::{Error, SimpleQueryMessage, SimpleQueryRow};
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
-use log::debug;
 use monoio::io::stream::Stream;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
-use std::sync::Arc;
+use std::rc::Rc;
+use tracing::debug;
+
+use super::query::extract_row_affected;
 
 /// Information about a column of a single query row.
 #[derive(Debug)]
@@ -68,7 +69,7 @@ pub(crate) fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> 
 /// A stream of simple query results.
 pub struct SimpleQueryStream {
     responses: Responses,
-    columns: Option<Arc<[SimpleColumn]>>,
+    columns: Option<Rc<[SimpleColumn]>>,
 }
 
 impl Stream for SimpleQueryStream {
@@ -82,7 +83,7 @@ impl Stream for SimpleQueryStream {
             },
             Ok(Message::EmptyQueryResponse) => Some(Ok(SimpleQueryMessage::CommandComplete(0))),
             Ok(Message::RowDescription(body)) => {
-                let columns: Arc<[SimpleColumn]> = match body
+                let columns: Rc<[SimpleColumn]> = match body
                     .fields()
                     .map(|f| Ok(SimpleColumn::new(f.name().to_string())))
                     .collect::<Vec<_>>()

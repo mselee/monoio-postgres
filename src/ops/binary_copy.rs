@@ -1,7 +1,8 @@
 //! Utilities for working with the PostgreSQL binary copy format.
 
+use crate::ext::slice_iter;
 use crate::types::{FromSql, IsNull, ToSql, Type, WrongType};
-use crate::{slice_iter, CopyInSink, CopyOutStream, Error};
+use crate::{CopyInSink, CopyOutStream, Error};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use monoio::io::sink::Sink;

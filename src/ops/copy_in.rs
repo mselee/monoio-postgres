@@ -1,16 +1,20 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::query::extract_row_affected;
-use crate::{query, simple_query, slice_iter, Error, Statement};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use local_sync::mpsc;
-use log::debug;
 use monoio::io::{sink::Sink, stream::Stream};
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use postgres_protocol::message::frontend::CopyData;
 use std::marker::PhantomData;
+use tracing::debug;
+
+use crate::clients::{InnerClient, Responses};
+use crate::connections::RequestMessages;
+use crate::entities::codec::FrontendMessage;
+use crate::ext::slice_iter;
+use crate::ops::{query, simple_query};
+use crate::{Error, Statement};
+
+use super::query::extract_row_affected;
 
 enum CopyInMessage {
     Message(FrontendMessage),
@@ -28,6 +32,10 @@ impl CopyInReceiver {
             receiver,
             done: false,
         }
+    }
+
+    pub(crate) fn hint(&self) -> usize {
+        self.receiver.hint()
     }
 }
 

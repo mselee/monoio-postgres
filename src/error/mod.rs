@@ -355,7 +355,6 @@ enum Kind {
     ConfigParse,
     Config,
     RowCount,
-    #[cfg(feature = "runtime")]
     Connect,
     Timeout,
 }
@@ -397,7 +396,6 @@ impl fmt::Display for Error {
             Kind::ConfigParse => fmt.write_str("invalid connection string")?,
             Kind::Config => fmt.write_str("invalid configuration")?,
             Kind::RowCount => fmt.write_str("query returned an unexpected number of rows")?,
-            #[cfg(feature = "runtime")]
             Kind::Connect => fmt.write_str("error connecting to server")?,
             Kind::Timeout => fmt.write_str("timeout waiting for server")?,
         };
@@ -510,7 +508,6 @@ impl Error {
         Error::new(Kind::RowCount, None)
     }
 
-    #[cfg(feature = "runtime")]
     pub(crate) fn connect(e: io::Error) -> Error {
         Error::new(Kind::Connect, Some(Box::new(e)))
     }
