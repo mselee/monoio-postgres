@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use local_sync::mpsc;
+use local_sync::{mpsc, oneshot};
 use monoio::io::{stream::Stream, CancelableAsyncReadRent, CancelableAsyncWriteRent, Splitable};
 
 use crate::{
@@ -44,5 +44,5 @@ pub trait Connection<S: CancelableAsyncReadRent + CancelableAsyncWriteRent + Spl
         pending_responses: VecDeque<BackendMessage>,
         parameters: HashMap<String, String>,
         receiver: mpsc::unbounded::Rx<Request>,
-    ) -> Self;
+    ) -> (oneshot::Sender<()>, Self);
 }

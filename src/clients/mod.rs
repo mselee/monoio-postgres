@@ -183,12 +183,16 @@ pub trait Client: Sized {
 
     fn inner(&self) -> &Rc<InnerClient>;
 
-    async fn reconnect(&self) -> Result<(Self, Self::Connection), Error>;
-
     async fn connect(
         config: Config,
         connector: fn(&Config) -> Pin<Box<dyn Future<Output = std::io::Result<Self::Transport>>>>,
-    ) -> Result<(Self, Self::Connection), Error>;
+    ) -> Result<Self, Error>;
+
+    async fn fork(&self) -> Result<Self, Error>;
+
+    async fn disconnect(&mut self);
+
+    fn kill(&mut self) -> Result<(), Error>;
 
     /// Creates a new prepared statement.
     ///

@@ -49,7 +49,7 @@ monoio = { version = "0.2.4", default-features = false, features = [
     "macros",
     "async-cancel",
 ] }
-local-sync = { git = "https://github.com/mselee/local-sync", rev = "ac522c3aee79337ad41c9c3c3dbdb2155f1e570f" }
+local-sync = { git = "https://github.com/mselee/local-sync", rev = "0d3f7393bcbc5b64f2299e66444f778e3cac457c" }
 monoio-codec = { git = "https://github.com/mselee/monoio-codec", rev = "9ee9a89f6a82e91cb27167fe48def0270239cc75" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

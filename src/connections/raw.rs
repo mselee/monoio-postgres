@@ -16,7 +16,7 @@ use postgres_protocol::message::frontend;
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 
 use super::{Connection, Request, RequestMessages, Response, State};
 
@@ -62,10 +62,17 @@ where
                 }
                 _ => {}
             }
+
+            trace!("writer: check state");
+            if self.shared.borrow().state == State::Closing {
+                trace!("poll_write: done");
+                return Ok(());
+            }
         }
     }
 
     async fn shutdown(&mut self) -> Result<(), Error> {
+        trace!("writer: shutting down...");
         self.outgoing.shutdown().await.map_err(Error::io)
     }
 
@@ -90,45 +97,34 @@ where
 
     async fn write(&mut self) -> Result<bool, Error> {
         loop {
-            trace!("writer: check state");
-            if self.shared.borrow().state == State::Closing {
-                trace!("poll_write: done");
-                return Ok(false);
-            }
-
+            trace!("writer: poll_request");
             let request = match self.poll_request().await {
                 Some(request) => request,
                 None => {
-                    let shared = self.shared.borrow();
-                    if shared.responses.is_empty() && shared.state == State::Active {
-                        trace!("poll_write: at eof, terminating");
-                        self.shared.borrow_mut().state = State::Terminating;
-                        let mut request = BytesMut::new();
-                        frontend::terminate(&mut request);
-                        RequestMessages::Single(FrontendMessage::Raw(request.freeze()))
-                    } else {
-                        trace!(
-                            "poll_write: at eof, pending responses {}",
-                            shared.responses.len()
-                        );
-                        return Ok(true);
-                    }
+                    trace!("poll_write: at eof, terminating");
+                    self.shared.borrow_mut().state = State::Terminating;
+                    let mut request = BytesMut::new();
+                    frontend::terminate(&mut request);
+                    RequestMessages::Single(FrontendMessage::Raw(request.freeze()))
                 }
             };
 
             match request {
-                RequestMessages::Single(request) => {
-                    self.outgoing.send(request).await.map_err(Error::io)?;
+                RequestMessages::Single(message) => {
+                    trace!("frontend: single");
+                    self.outgoing.send(message).await.map_err(Error::io)?;
                     if self.receiver.hint() == 0 {
                         Sink::flush(&mut self.outgoing).await.map_err(Error::io)?;
                     }
-                    trace!("request: sent");
+                    trace!("frontend: sent");
                     if self.shared.borrow().state == State::Terminating {
                         trace!("poll_write: sent eof, closing");
                         self.shared.borrow_mut().state = State::Closing;
+                        return Ok(false);
                     }
                 }
                 RequestMessages::CopyIn(mut receiver) => {
+                    trace!("request: copy-in");
                     let message = match receiver.next().await {
                         Some(message) => message,
                         None => {
@@ -146,6 +142,7 @@ where
                     self.pending_request = Some(RequestMessages::CopyIn(receiver));
                 }
                 RequestMessages::CopyBoth(mut receiver) => {
+                    trace!("request: copy-both");
                     let message = match receiver.next().await {
                         Some(message) => message,
                         None => {
@@ -175,10 +172,11 @@ impl<S: CancelableAsyncReadRent + CancelableAsyncWriteRent + Splitable + 'static
         pending_responses: VecDeque<BackendMessage>,
         parameters: HashMap<String, String>,
         receiver: mpsc::unbounded::Rx<Request>,
-    ) -> Self {
+    ) -> (oneshot::Sender<()>, Self) {
         let shared = Rc::new(UnsafeCell::new(stream));
         let (r, w) = (OwnedReadHalf(shared.clone()), OwnedWriteHalf(shared));
-        let (kill_tx, kill_rx) = oneshot::channel();
+        let (shutdown_internal_tx, shutdown_internal_rx) = oneshot::channel();
+        let (shutdown_external_tx, shutdown_external_rx) = oneshot::channel();
         let shared = Shared {
             state: State::Active,
             responses: VecDeque::new(),
@@ -198,11 +196,20 @@ impl<S: CancelableAsyncReadRent + CancelableAsyncWriteRent + Splitable + 'static
 
         monoio::spawn(async move {
             let writer_fut = writer.run();
+            let shutdown_internal_fut = shutdown_internal_rx;
+            let shutdown_external_fut = shutdown_external_rx;
 
             monoio::select! {
                 biased;
-                _ = writer_fut => {},
-                _ = kill_rx => {
+                _ = writer_fut => {
+                    trace!("shutdown: clean");
+                },
+                _ = shutdown_internal_fut => {
+                    trace!("shutdown: internal");
+                    canceller.cancel();
+                },
+                _ = shutdown_external_fut => {
+                    trace!("shutdown: external");
                     canceller.cancel();
                 },
             }
@@ -210,13 +217,14 @@ impl<S: CancelableAsyncReadRent + CancelableAsyncWriteRent + Splitable + 'static
             let _ = writer.shutdown().await;
         });
 
-        Self {
+        let conn = Self {
             pending_responses,
             shared,
             parameters,
             incoming: FramedRead::new(r, PostgresCodec, handle.clone()),
-            shutdown: Some(kill_tx),
-        }
+            shutdown: Some(shutdown_internal_tx),
+        };
+        (shutdown_external_tx, conn)
     }
 }
 
@@ -224,7 +232,7 @@ impl<S> RawConnection<S>
 where
     S: CancelableAsyncReadRent + CancelableAsyncWriteRent,
 {
-    async fn shutdown(&mut self) -> Result<(), Error> {
+    fn shutdown(&mut self) -> Result<(), Error> {
         self.shutdown
             .take()
             .unwrap()
@@ -233,17 +241,23 @@ where
         Ok(())
     }
 
+    pub fn closed(&self) -> bool {
+        self.shared.borrow().state == State::Closing
+    }
+
     /// Returns the value of a runtime parameter for this connection.
     pub fn parameter(&self, name: &str) -> Option<&str> {
         self.parameters.get(name).map(|s| &**s)
     }
 
     async fn response(&mut self) -> Option<Result<BackendMessage, Error>> {
+        trace!("response: polling...");
         if let Some(message) = self.pending_responses.pop_front() {
             trace!("retrying pending response");
             return Some(Ok(message));
         }
 
+        trace!("response: waiting on tcp...");
         self.incoming.next().await.map(|r| r.map_err(Error::io))
     }
 
@@ -260,6 +274,8 @@ where
                 Some(message) => message,
                 None => return Err(Error::closed()),
             };
+
+            trace!("read: new message");
 
             let (mut messages, request_complete) = match message? {
                 BackendMessage::Async(Message::NoticeResponse(body)) => {
@@ -288,8 +304,8 @@ where
                 } => (messages, request_complete),
             };
 
-            let shared = self.shared.borrow();
-            let response = match shared.responses.get(0) {
+            let mut shared = self.shared.borrow_mut();
+            let response = match shared.responses.pop_front() {
                 Some(response) => response,
                 None => match messages.next().map_err(Error::parse)? {
                     Some(Message::ErrorResponse(error)) => return Err(Error::db(error)),
@@ -297,18 +313,20 @@ where
                 },
             };
 
+            // drop `shared` to avoid holding the reference across `await` boundaries
+            drop(shared);
+
+            trace!("request complete: {}", request_complete);
             match response.sender.send(messages).await {
                 Ok(()) => {
-                    if request_complete {
-                        drop(shared);
-                        self.shared.borrow_mut().responses.pop_front();
+                    if !request_complete {
+                        self.shared.borrow_mut().responses.push_front(response);
                     }
                 }
                 Err(_) => {
                     // we need to keep paging through the rest of the messages even if the receiver's hung up
-                    if request_complete {
-                        drop(shared);
-                        self.shared.borrow_mut().responses.pop_front();
+                    if !request_complete {
+                        self.shared.borrow_mut().responses.push_front(response);
                     }
                 }
             }
@@ -326,7 +344,7 @@ where
     pub async fn next_message(&mut self) -> Option<Result<AsyncMessage, Error>> {
         match self.read().await {
             Ok(Some(message)) => Some(Ok(message)),
-            Ok(None) => match self.shutdown().await {
+            Ok(None) => match self.shutdown() {
                 Ok(()) => None,
                 Err(e) => Some(Err(e)),
             },
